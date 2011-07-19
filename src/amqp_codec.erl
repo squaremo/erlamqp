@@ -14,7 +14,7 @@
                  | 'true'| 'false' | 'null'
                  | {'decimal', binary()}
                  | {'char', char()}
-                 | {'timestamp', 0..16#ffffffffffffffff}
+                 | {'timestamp', -16#8000000000000000..16#7fffffffffffffff}
                  | {'uuid', <<_:16>>}
                  | {'utf8', binary()}
                  | map()
@@ -33,7 +33,7 @@
 -type(type() :: type_also_encoding()
                 | 'binary' | 'string' | 'symbol'
                 | 'float' | 'double'
-                | 'list' | 'map' | 'array'
+                | 'list' | 'map' | {'array', type()}
                 | 'decimal32' | 'decimal64' | 'decimal128'
                 | {'described', value(), type()}).
 
@@ -62,15 +62,13 @@
 %% Generate bytes given a specific type and the value
 -spec(generate/2 :: (type(), value()) -> iolist()).
 
-
 parse(Bin) ->
     parse(start, Bin).
 
 parse(start, Bin) ->
     case parse_type(Bin) of
         {value, {Type, Encoding}, Rest} ->
-            continue(fun (B) -> parse_value(Encoding, B) end,
-                     Rest,
+            continue(parse_value(Encoding, Rest),
                      fun(V, R) -> {value, {Type, V}, R} end);
         {more, _K} ->
             {more, fun (MoreBin) ->
@@ -81,17 +79,36 @@ parse(start, Bin) ->
 parse(K, Bin) ->
     K(Bin).
 
+parse_type(<<>>) ->
+    {more, fun parse_type/1};
+%% 'Described' types
 parse_type(<<16#00, Rest/binary>>) ->
-    continue(fun parse/1, Rest,
+    continue(parse(Rest),
              fun({_Type, Val}, Rest1) ->
-                     continue(fun parse_type/1, Rest1,
+                     continue(parse_type(Rest1),
                               fun ({_Type, Enc}, Rest2) ->
                                       {value, {{described, Val},
                                                {described, Val, Enc}}, Rest2}
                               end)
              end);
-parse_type(<<>>) ->
-    {more, fun parse_type/1};
+%% Arrays get special treatment. Because the type of the elements
+%% comes in the common constructor after the size, we have to peek
+%% ahead.
+parse_type(Bin = <<16#e0, Size:8, Count:8, Rest/binary>>) ->
+    continue(parse_type(Rest),
+             fun({Type, _Enc}, _R) ->
+                     <<_C:8, Rest1/binary>> = Bin,
+                     {value, {{array, Type}, array8}, Rest1}
+             end);
+parse_type(Bin = <<16#f0, Size:32, Count:32, Rest/binary>>) ->
+    continue(parse_type(Rest),
+             fun({Type, Enc}, _R) ->
+                     <<_C:8, Rest1/binary>> = Bin,
+                     {value, {{array, Type}, array32}, Rest1}
+             end); 
+parse_type(Bin = <<Constructor:8, Rest/binary>>) when
+      Constructor == 16#e0 orelse Constructor == 16#f0 ->
+    {more, fun(Bin1) -> parse_type(<<Bin/binary, Bin1/binary>>) end};
 %% Primitive types
 parse_type(<<Constructor:8, Rest/binary>>) ->
     {value, type_and_encoding(Constructor), Rest}.
@@ -190,8 +207,7 @@ parse_value(array8, <<Size:8, Encoded:Size/binary, Rest/binary>>) ->
 parse_value(array32, <<Size:32, Encoded:Size/binary, Rest/binary>>) ->
     parse_array(32, Encoded, valueK(Rest));
 parse_value({described, Name, Enc}, Bin) ->
-    continue(fun (Bin1) -> parse_value(Enc, Bin1) end,
-             Bin,
+    continue(parse_value(Enc, Bin),
              fun(Val, Rest) -> {value, {described, Name, Val}, Rest} end); 
 
 %% Fall-through -- we assume it's because the bit pattern has failed,
@@ -202,7 +218,93 @@ parse_value(Encoding, Insufficient) ->
                    parse_value(Encoding, <<Insufficient/binary, Bin/binary>>)
            end}.
 
-generate(Type, Value) ->
+generate(null, null) ->
+    [16#40];
+generate(boolean, true) ->
+    [16#41];
+generate(boolean, false) ->
+    [16#42];
+generate(ubyte, Num) ->
+    [16#50, Num];
+generate(ushort, Num) ->
+    <<16#60, Num:16>>;
+generate(uint, Num) ->
+    if Num == 0  -> [16#43];
+       Num < 256 -> <<16#52, Num:8>>;
+       true      -> <<16#70, Num:32>>
+    end;
+generate(ulong, Num) ->
+    if Num == 0  -> [16#44]; 
+       Num < 256 -> <<16#53, Num:8>>;
+       true      -> <<16#80, Num:64>>
+    end;
+generate(byte, Num) ->
+    <<16#51, Num:8/signed>>;
+generate(short, Num) ->
+    <<16#61, Num:16/signed>>;
+generate(int, Num) ->
+    if Num < 128 andalso Num > -129 ->
+            <<16#54, Num:8/signed>>;
+       true ->
+            <<16#71, Num:32/signed>>
+    end;
+generate(long, Num) ->
+    if Num < 128 andalso Num > -129 ->
+            <<16#55, Num:8/signed>>;
+       true ->
+            <<16#81, Num:64/signed>>
+    end;
+generate(float, Num) ->
+    <<16#72, Num:32/float>>;
+generate(double, Num) ->
+    <<16#82, Num:64/float>>;
+generate(decimal32, {decimal, DecBin = <<_:32>>}) ->
+    [16#74, DecBin];
+generate(decimal64, {decimal, DecBin = <<_:64>>}) ->
+    [16#84, DecBin];
+generate(decimal128, {decimal, DecBin = <<_:128>>}) ->
+    [16#94, DecBin];
+generate(char, {char, CharBin = <<_/utf32>>}) ->
+    [16#73, CharBin];
+generate(timestamp, {timestamp, TS}) ->
+    <<16#83, TS:64/signed>>;
+generate(uuid, {uuid, Bin = <<_:16/binary>>}) ->
+    [16#98, Bin];
+generate(binary, Bin) ->
+    Size = size(Bin),
+    if Size < 256 ->
+            [16#a0, Size, Bin];
+       true ->
+            [<<16#b0, Size:32>>, Bin]
+    end;
+generate(string, {utf8, Bin}) ->
+    Size = size(Bin),
+    if Size < 256 ->
+            [16#a1, Size, Bin];
+       true ->
+            [<<16#b1, Size:32>>, Bin]
+    end;
+%% Erlang atoms are not bigger than 255 chars
+generate(symbol, Sym) when is_atom(Sym) ->
+    SymList = atom_to_list(Sym),
+    <<16#a3, (length(SymList)):8, (list_to_binary(SymList))/binary>>;
+generate(list, List) ->
+    generate_list(List);
+generate(map, Pairs) ->
+    generate_map(Pairs);
+generate({array, Type}, Vals) ->
+    generate_array(Type, Vals).
+
+
+generate_list([]) ->
+    [16#45];
+generate_list(List) ->
+    [].
+
+generate_map(Pairs) ->
+    [].
+
+generate_array(Type, Entries) ->
     [].
 
 %% ----- Helpers
@@ -246,14 +348,14 @@ parse_array1(0, _Encoding, <<>>, Acc, K) ->
 parse_array1(Count, Encoding, Bin, Acc, K) ->
     {value, Val, Rest} = parse_value(Encoding, Bin),
     parse_array1(Count - 1, Encoding, Rest, [Val | Acc], K).
-    
-continue(Parse, Rest, K) ->
-    case Parse(Rest) of
+
+continue(Parsed, K) ->
+    case Parsed of
         {value, Value, Rest1} ->
             K(Value, Rest1);
         {more, Parse1} ->
             {more, fun (MoreBin) ->
-                           continue(Parse1, MoreBin, K)
+                           continue(Parse1(MoreBin), K)
                    end}
     end.
 
@@ -294,6 +396,4 @@ type_and_encoding(16#45) -> {list, list0};
 type_and_encoding(16#c0) -> {list, list8};
 type_and_encoding(16#d0) -> {list, list32};
 type_and_encoding(16#c1) -> {map, map8};
-type_and_encoding(16#d1) -> {map, map32};
-type_and_encoding(16#e0) -> {array, array8};
-type_and_encoding(16#f0) -> {array, array32}.
+type_and_encoding(16#d1) -> {map, map32}.

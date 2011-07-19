@@ -47,6 +47,7 @@ parse_primitive_test_() ->
         <<16#81, 127, 255, 255, 255, 255, 255, 255, 255>>},
        {"neg long", {long, -1},
         <<16#81, 255, 255, 255, 255, 255, 255, 255, 255>>},
+       {"smalllong", {long, -1}, <<16#55, 255>>},
 
        %% TODO Floats, Doubles, decimals
 
@@ -66,7 +67,6 @@ parse_primitive_test_() ->
        {"symbol8", {symbol, foobar}, <<16#a3, 6, "foobar">>},
        {"symbol32", {symbol, foobar}, <<16#b3, 6:32, "foobar">>}
       ]).
-
 
 parse_lists_test_() ->
     parse_cases(
@@ -97,8 +97,8 @@ parse_maps_test_() ->
 parse_arrays_test_() ->
     parse_cases(
       [
-       {"array8", {array, [1, 2]}, <<16#e0, 4, 2, 16#50, 1, 2>>},
-       {"array nulls", {array, [null, null, null]}, <<16#e0, 2, 3, 16#40>>}
+       {"array8", {{array, ubyte}, [1, 2]}, <<16#e0, 4, 2, 16#50, 1, 2>>},
+       {"array nulls", {{array, null}, [null, null, null]}, <<16#e0, 2, 3, 16#40>>}
       ]).
 
 parse_described_test_() ->
@@ -108,3 +108,28 @@ parse_described_test_() ->
                 {described, 'URL', {utf8, <<"http://rabbit.mq/">>}}},
         <<16#00, 16#a3, 3, "URL", 16#a1, 17, "http://rabbit.mq/">>}
       ]).
+
+roundtrip_test_() ->
+    [{N, fun() ->
+                 B = iolist_to_binary(amqp_codec:generate(T, V)),
+                 {value, {T, V}, <<>>} = amqp_codec:parse(B)
+         end} ||
+        {N, T, V} <-
+            [{"null", null, null},
+             {"true", boolean, true},
+             {"false", boolean, false},
+             {"true sym", symbol, true},
+             {"ubyte", ubyte, 253},
+             {"ushort", ushort, 16#beef},
+             {"uint0", uint, 0},
+             {"smalluint", uint, 255},
+             {"uint", uint, 16#c0ffee},
+             {"ulong0", ulong, 0},
+             {"smallulong", ulong, 237}
+             %% Floats doubles and decimals 
+             %% ...
+             %% UUIDs, timestamps, strings
+             %% ...
+             %% Lists, maps, arrays
+             %% ...
+            ]].
