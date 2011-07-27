@@ -1,12 +1,11 @@
 {application, amqp,
  [
-  {description, ""},
-  {vsn, "1"},
+  {description, "AMQP 1.0 library"},
+  {vsn, "0.0.1"},
   {registered, []},
   {applications, [
                   kernel,
                   stdlib
                  ]},
-  {mod, { amqp_app, []}},
   {env, []}
  ]}.
