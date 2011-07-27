@@ -1,6 +1,42 @@
+%% AMQP 1.0 codec.
+%%
+%% This serves two purposes: firstly, as a general-purpose
+%% implementation of the AMQP 1.0 codec, from and to Erlang terms;
+%% secondly, as the means for parsing and generating AMQP 1.0 protocol
+%% frames.
+%%
+%% In the latter case, the protocol frames are defined as "composite"
+%% types, that is, they are encoded as described types with a list (or
+%% less often, map) of defined types. For this reason, there are
+%% special-purpose procedures for composite types.
+%%
+%% The former case is really only of interest for applications (rather
+%% than servers or clients). The mapping from the AMQP 1.0 types to
+%% Erlang terms to AMQP 1.0 types is
+%%
+%%   null -> 'null' -> null
+%%   boolean -> boolean() -> boolean
+%%   ubyte | ushort | uint | ulong | byte | short | int | long -> number() -> long
+%%   float | double -> number() -> double
+%%   char -> {char, char()} -> char
+%%   binary -> binary() -> binary
+%%   string -> {'utf8', binary()} -> string
+%%   decimal32 | decimal64 | decimal128 -> {decimal, binary()} -> decimal*
+%%   timestamp -> {timestamp, number()} -> timestamp
+%%   uuid -> {uuid, binary()} -> uuid
+%%   list -> list(value()) -> list
+%%   map -> {list({value(), value()})} -> map
+%%
+%% An array may be used to compactly encode several items of the same
+%% type; in this case, the type must be mentioned in the term supplied:
+%% {array, type(), list(value())}
+%%
+%% Described types are encoded as an Erlang term
+%% {described, value(), value()}
+
 -module(amqp_codec).
 
--export([parse/1, parse/2, parse_type/1, parse_value/2, generate/2]).
+-export([parse/1, parse/2, parse_type/1, parse_value/2, generate/1, generate/2]).
 
 -export_type([value/0, type/0, encoding/0, result/1, map/0]).
 
@@ -19,6 +55,7 @@
                  | {'utf8', binary()}
                  | map()
                  | list(value())
+                 | {'array', type(), value()}
                  | {'described', value(), value()}).
 
 %% This will do for now, but we may want to admit other kinds of map
@@ -59,7 +96,11 @@
 %% Parse a value given the type
 -spec(parse_value/2 :: (encoding(), binary()) -> result(value())).
 
-%% Generate bytes given a specific type and the value
+%% General purpose unparsing
+-spec(generate/1 :: (value()) -> iolist()).
+
+%% Generate bytes given a specific type and the value. Note that this
+%% may use generate/1 for the items in compound types.
 -spec(generate/2 :: (type(), value()) -> iolist()).
 
 parse(Bin) ->
@@ -72,7 +113,7 @@ parse(start, Bin) ->
                      fun(V, R) -> {value, {Type, V}, R} end);
         {more, _K} ->
             {more, fun (MoreBin) ->
-                           %% bleh, just start again
+                           %% TODO bleh, just start again.
                            parse(start, <<Bin/binary, MoreBin/binary>>)
                    end}
     end;
@@ -105,7 +146,7 @@ parse_type(Bin = <<16#f0, Size:32, Count:32, Rest/binary>>) ->
              fun({Type, Enc}, _R) ->
                      <<_C:8, Rest1/binary>> = Bin,
                      {value, {{array, Type}, array32}, Rest1}
-             end); 
+             end);
 parse_type(Bin = <<Constructor:8, Rest/binary>>) when
       Constructor == 16#e0 orelse Constructor == 16#f0 ->
     {more, fun(Bin1) -> parse_type(<<Bin/binary, Bin1/binary>>) end};
@@ -208,33 +249,63 @@ parse_value(array32, <<Size:32, Encoded:Size/binary, Rest/binary>>) ->
     parse_array(32, Encoded, valueK(Rest));
 parse_value({described, Name, Enc}, Bin) ->
     continue(parse_value(Enc, Bin),
-             fun(Val, Rest) -> {value, {described, Name, Val}, Rest} end); 
+             fun(Val, Rest) -> {value, {described, Name, Val}, Rest} end);
 
 %% Fall-through -- we assume it's because the bit pattern has failed,
 %% so there are not sufficient bytes available to parse a whole value.
-%% TODO check the encoding is correct.
+%% TODO check the encoding supplied is really an encoding.
 parse_value(Encoding, Insufficient) ->
     {more, fun (Bin) ->
                    parse_value(Encoding, <<Insufficient/binary, Bin/binary>>)
            end}.
 
+generate(null) ->
+    generate(null, null);
+generate(Bool) when Bool =:= true orelse Bool =:= false ->
+    generate(boolean, Bool);
+generate(Num) when is_integer(Num) ->
+    generate(long, Num);
+generate(Num) when is_float(Num) ->
+    generate(double, Num);
+generate(Char = {char, <<_/utf32>>}) ->
+    generate(char, Char);
+generate(TS = {timestamp, Ms}) when is_integer(Ms) ->
+    generate(timestamp, TS);
+generate(UUID = {uuid, U}) when is_binary(U) ->
+    generate(uuid, UUID);
+generate(Bin) when is_binary(Bin) ->
+    generate(binary, Bin);
+generate(Str = {utf8, S}) when is_binary(S) ->
+    generate(string, Str);
+generate(Sym) when is_atom(Sym) ->
+    generate(symbol, Sym);
+generate(Map = {Pairs}) when is_list(Pairs) ->
+    generate(map, Map);
+generate(List) when is_list(List) ->
+    generate(list, List);
+generate({array, Type, List}) ->
+    generate({array, Type}, List);
+generate({described, Name, Value}) ->
+    generate({described, Name}, Value).
+
+
 generate(null, null) ->
-    [16#40];
+    <<16#40>>;
 generate(boolean, true) ->
-    [16#41];
+    <<16#41>>;
 generate(boolean, false) ->
-    [16#42];
+    <<16#42>>;
 generate(ubyte, Num) ->
-    [16#50, Num];
+    <<16#50, Num:8>>;
 generate(ushort, Num) ->
     <<16#60, Num:16>>;
 generate(uint, Num) ->
-    if Num == 0  -> [16#43];
+    if Num == 0  -> <<16#43>>;
        Num < 256 -> <<16#52, Num:8>>;
        true      -> <<16#70, Num:32>>
     end;
 generate(ulong, Num) ->
-    if Num == 0  -> [16#44]; 
+    if Num == 0  -> <<16#44>>;
        Num < 256 -> <<16#53, Num:8>>;
        true      -> <<16#80, Num:64>>
     end;
@@ -293,22 +364,198 @@ generate(list, List) ->
 generate(map, Pairs) ->
     generate_map(Pairs);
 generate({array, Type}, Vals) ->
-    generate_array(Type, Vals).
-
+    generate_array(Type, Vals);
+generate({described, Name}, Value) ->
+    GenName = generate(Name),
+    EncodedValue = generate(Value),
+    [0, GenName, EncodedValue].
 
 generate_list([]) ->
     [16#45];
 generate_list(List) ->
-    [].
+    encode_list([generate(V) || V <- List], 16#c0, 16#d0).
 
-generate_map(Pairs) ->
-    [].
+encode_list(Generated, Enc8, Enc32) ->
+    Count = length(Generated),
+    Size = iolist_size(Generated),
+    if Count < 256 andalso Size < 255 -> % one byte for the count
+            [<<Enc8, (Size + 1):8, Count:8>>, Generated];
+       true ->
+            [<<Enc32, (Size + 4):32, Count:32>>, Generated]
+    end.
 
+generate_map({Pairs}) ->
+    %% Annoyingly, we cannot use a list comprehension
+    generate_map1(Pairs, []).
+
+generate_map1([], Generated) ->
+    encode_list(lists:reverse(Generated), 16#c1, 16#d1);
+generate_map1([{Key, Value} | Rest], Acc) ->
+    GenKey = generate(Key),
+    GenVal = generate(Value),
+    generate_map1(Rest, [GenVal, GenKey | Acc]).
+
+%% We have to treat compound types specially, because the type
+%% constructor depends on how the values get encoded.
+generate_array(list, Entries) ->
+    encode_array_compounds(Entries, 16#c0, 16#d0);
+generate_array(map, Entries) ->
+    encode_array_compounds(Entries, 16#c1, 16#d1);
+generate_array({array, T}, Entries) ->
+    encode_array_compounds(Entries, 16#e0, 16#f0);
 generate_array(Type, Entries) ->
-    [].
+    {Encoding, Constructor} = lowest_common_encoding(Type, Entries),
+    GenValues = [generate_value(Encoding, E) || E <- Entries],
+    Size = iolist_size(GenValues) + iolist_size(Constructor),
+    Count = length(GenValues),
+    if Size < 256 andalso Count < 255 ->
+            [<<16#e0, (Size + 1):8, Count:8>>, Constructor, GenValues];
+       true ->
+            [<<16#f0, (Size + 4):32, Count:32>>, Constructor, GenValues]
+    end.
+
+lowest_common_encoding(null, _Values) ->
+    {null, <<16#40>>};
+%% We could use a byte each if all the values are the same.
+lowest_common_encoding(boolean, _List) ->
+    {boolean, <<16#56>>};
+lowest_common_encoding(ubyte, _List) ->
+    {ubyte, <<16#50>>};
+lowest_common_encoding(ushort, _List) ->
+    {ushort, <<16#60>>};
+lowest_common_encoding(uint, List) ->
+    lowest1(uint, List, {uint0, <<16#43>>});
+lowest_common_encoding(ulong, List) ->
+    lowest1(ulong, List, {ulong0, <<16#44>>});
+lowest_common_encoding(byte, _List) ->
+    {byte, <<16#51>>};
+lowest_common_encoding(short, _List) ->
+    {short, <<16#61>>};
+lowest_common_encoding(int, List) ->
+    lowest1(int, List, {smallint, <<16#54>>});
+lowest_common_encoding(long, List) ->
+    lowest1(long, List, {smalllong, <<16#54>>});
+lowest_common_encoding(float, _List) ->
+    {ieee754binary32, <<16#72>>};
+lowest_common_encoding(double, _List) ->
+    {ieee754binary64, <<16#82>>};
+lowest_common_encoding(decimal32, _List) ->
+    {ieee754decimal32, <<16#74>>};
+lowest_common_encoding(decimal64, _List) ->
+    {ieee754decimal64, <<16#84>>};
+lowest_common_encoding(decimal128, _List) ->
+    {ieee754decimal128, <<16#94>>};
+lowest_common_encoding(char, _List) ->
+    {char, <<16#73>>};
+lowest_common_encoding(timestamp, _List) ->
+    {ms64, <<16#83>>};
+lowest_common_encoding(uuid, _List) ->
+    {uuid, <<16#98>>};
+lowest_common_encoding(binary, List) ->
+    lowest1(binary, List, {vbin8, <<16#a0>>});
+lowest_common_encoding(string, List) ->
+    lowest1(string, List, {str8utf8, <<16#a1>>});
+%% We don't support symbols longer than 255
+lowest_common_encoding(symbol, _List) ->
+    {sym8, <<16#a3>>}.
+%% Array, List, Map are special-cased above.
+
+lowest1(_Any, [], Enc) ->
+    Enc;
+lowest1(uint, [0 | Rest], Enc) ->
+    lowest1(uint, Rest, Enc);
+lowest1(uint, [Num | Rest], Enc) when Num < 256 ->
+    lowest1(uint, Rest, {smalluint, <<16#52>>});
+lowest1(uint, _List, _Enc) ->
+    {uint, <<16#70>>};
+lowest1(ulong, [0 | Rest], Enc) ->
+    lowest1(ulong, Rest, Enc);
+lowest1(ulong, [Num | Rest], Enc) when Num < 256 ->
+    lowest1(ulong, Rest, {smallulong, <<16#53>>});
+lowest1(ulong, _List, _Enc) ->
+    {ulong, <<16#80>>};
+lowest1(int, [Num | Rest], Enc) when Num > -129 andalso Num < 128 ->
+    lowest1(int, Rest, Enc);
+lowest1(int, _List, _Enc) ->
+    {int, <<16#71>>};
+lowest1(long, [Num | Rest], Enc) when Num > -129 andalso Num < 128 ->
+    lowest1(long, Rest, Enc);
+lowest1(long, _List, _Enc) ->
+    {long, <<16#81>>};
+lowest1(binary, [Bin | Rest], Enc) when size(Bin) < 256 ->
+    lowest1(binary, Rest, Enc);
+lowest1(binary, _List, _Enc) ->
+    {vbin32, <<16#b0>>};
+lowest1(string, [{utf8, Bin} | Rest], Enc) when size(Bin) < 256 ->
+    lowest1(string, Rest, Enc);
+lowest1(string, _List, _Enc) ->
+    {str32utf8, <<16#b1>>}.
+
+%% Why anyone would make an array of null values is beyond me.
+generate_value(null, null) ->
+    [];
+generate_value(boolean, true) ->
+    1;
+generate_value(boolean, false) ->
+    0;
+generate_value(ubyte, Num) when Num < 256 ->
+    Num;
+generate_value(ushort, Num) when Num < 16#10000 ->
+    <<Num:16/unsigned>>;
+generate_value(uint0, 0) ->
+    [];
+generate_value(smalluint, Num) when Num < 256 ->
+    Num;
+generate_value(uint, Num) when Num < 16#100000000 ->
+    <<Num:32/unsigned>>;
+generate_value(ulong0, 0) ->
+    [];
+generate_value(smallulong, Num) when Num < 256 ->
+    Num;
+generate_value(ulong, Num) when Num < 16#10000000000000000 ->
+    <<Num:64/unsigned>>;
+generate_value(byte, Num) when Num > -129 andalso Num < 128 ->
+    Num;
+generate_value(short, Num) when Num > -16#8001 andalso Num < 16#8000 ->
+    <<Num:16/signed>>;
+generate_value(smallint, Num) when Num > -129 andalso Num < 128 ->
+    Num;
+generate_value(int, Num) when Num > -16#80000001 andalso Num < 16#80000000 ->
+    <<Num:32/signed>>;
+generate_value(smalllong, Num) when Num > -129 andalso Num < 128 ->
+    Num;
+generate_value(long, Num) when Num > -16#8000000000000001 andalso
+                               Num < 16#8000000000000000 ->
+    <<Num:64/signed>>;
+generate_value(ieee754binary32, Num) ->
+    <<Num:32/float>>;
+generate_value(ieee754binary64, Num) ->
+    <<Num:64/float>>;
+generate_value(ieee754decimal32, {decimal, Bin}) when size(Bin) == 4 ->
+    Bin;
+generate_value(ieee754decimal64, {decimal, Bin}) when size(Bin) == 8 ->
+    Bin;
+generate_value(ieee754decimal128, {decimal, Bin}) when size(Bin) == 16 ->
+    Bin;
+generate_value(char, {char, Val}) ->
+    Val;
+generate_value(timestamp, {timestamp, MS}) ->
+    <<MS:64/signed>>;
+generate_value(uuid, {uuid, Bin}) when size(Bin) == 16 ->
+    Bin;
+generate_value(vbin8, Bin) when size(Bin) < 256 ->
+    [size(Bin), Bin];
+generate_value(vbin32, Bin) ->
+    [<<(size(Bin)):32/unsigned>>, Bin];
+generate_value(str8utf8, {utf8, Bin}) when size(Bin) < 256 ->
+    [size(Bin), Bin];
+generate_value(str32utf8, {utf8, Bin}) ->
+    [<<(size(Bin)):32/unsigned>>, Bin];
+generate_value(sym8, Symbol) ->
+    AsBin = list_to_binary(atom_to_list(Symbol)),
+    [size(AsBin), AsBin].
 
 %% ----- Helpers
-
 
 valueK(Rest) ->
     fun (Value) -> {value, Value, Rest} end.
@@ -358,6 +605,49 @@ continue(Parsed, K) ->
                            continue(Parse1(MoreBin), K)
                    end}
     end.
+
+encode_array_compounds(Entries, Enc8, Enc32) ->
+    encode_array_compounds1(Entries, Enc8, Enc32, 8, []).
+
+encode_array_compounds1([], Enc8, Enc32, EncSize, Entries) ->
+    encode_array_compounds2(Entries, Enc8, Enc32, EncSize, [], 0);
+encode_array_compounds1([Entry | Rest], Enc8, Enc32, EncSize, Acc) ->
+    %% Relies on the fact list and map and array all both produce this
+    %% form. Special case for the empty list, however.
+    case generate(Entry) of
+        <<16#45>> ->
+            encode_array_compounds1(Rest, Enc8, Enc32, EncSize,
+                                   [{0, 0, []} | Acc]);
+        [Header | Items] ->
+            case Header of
+                <<Enc32:8, Size:32, Count:32>> ->
+                    encode_array_compounds1(Rest, Enc8, Enc32, 32,
+                                            [{Size - 4, Count, Items} | Acc]);
+                <<Enc8:8, Size:8, Count:8>> ->
+                    encode_array_compounds1(Rest, Enc8, Enc32, EncSize,
+                                            [{Size - 1, Count, Items} | Acc])
+            end
+    end.
+
+encode_array_compounds2([], Enc8, Enc32, EncSize, ReEncoded, CountAll) ->
+    Enc = case EncSize of 8 -> Enc8; 32 -> Enc32 end,
+    Size = iolist_size(ReEncoded), % TODO as part of the recursion
+    if CountAll < 256 andalso Size < 255 ->
+            [<<16#e0, (Size + 2):8, CountAll:8, Enc:8>>, ReEncoded];
+       true ->
+            [<<16#f0, (Size + 5):32, CountAll:32, Enc:8>>, ReEncoded]
+    end;
+encode_array_compounds2([{Size, Count, Items} | Rest],
+                        Enc8, Enc32, EncSize, Acc, CountAll) ->
+    ReEncoded =
+        case EncSize of
+            8 ->
+                [<<(Size + 1):8, Count:8>>, Items];
+            32 ->
+                [<<(Size + 4):32, Count:32>>, Items]
+        end,
+    encode_array_compounds2(Rest, Enc8, Enc32, EncSize,
+                            [ReEncoded | Acc], CountAll + 1).
 
 
 type_and_encoding(16#40) -> {null, null};

@@ -112,7 +112,9 @@ parse_described_test_() ->
 roundtrip_test_() ->
     [{N, fun() ->
                  B = iolist_to_binary(amqp_codec:generate(T, V)),
-                 {value, {T, V}, <<>>} = amqp_codec:parse(B)
+                 {value, {T, V}, <<>>} = amqp_codec:parse(B),
+                 B1 = iolist_to_binary(amqp_codec:generate(V)),
+                 {value, {_, V}, <<>>} = amqp_codec:parse(B1)
          end} ||
         {N, T, V} <-
             [{"null", null, null},
@@ -125,11 +127,26 @@ roundtrip_test_() ->
              {"smalluint", uint, 255},
              {"uint", uint, 16#c0ffee},
              {"ulong0", ulong, 0},
-             {"smallulong", ulong, 237}
-             %% Floats doubles and decimals 
+             {"smallulong", ulong, 237},
+             %% Floats doubles and decimals
              %% ...
-             %% UUIDs, timestamps, strings
+             {"uuid", uuid, {uuid, <<"is sixteen bytes">>}},
+             {"timestamp", timestamp, {timestamp, -16#8000000000000000}},
+             {"string", string, {utf8, <<"a short string">>}},
+             {"symbol", symbol, a_short_symbol},
+             %% Longer symbols and strings and binaries
              %% ...
-             %% Lists, maps, arrays
-             %% ...
+             %% Lists, maps
+             {"empty list", list, []},
+             {"list of numbers", list, [1,2,3,4]},
+             {"map", map, {[{foo, 3}, {bar, 6}]}},
+             %% Arrays
+             {"array", {array, int}, [0, 5, 257]},
+             {"array bin", {array, binary}, [<<"foo">>, <<"bar">>]},
+             {"array list", {array, list}, [[1, 2, 3], [4, 5, 6]]},
+             {"array map", {array, map},
+              [{[{foo, 1}, {bar, 2}]}, {[{baz, 3}]}]},
+             {"array null", {array, null}, [null, null, null, null]}
             ]].
+
+%% TODO arrays of arrays
