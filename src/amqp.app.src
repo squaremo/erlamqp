@@ -1,0 +1,12 @@
+{application, amqp,
+ [
+  {description, ""},
+  {vsn, "1"},
+  {registered, []},
+  {applications, [
+                  kernel,
+                  stdlib
+                 ]},
+  {mod, { amqp_app, []}},
+  {env, []}
+ ]}.
