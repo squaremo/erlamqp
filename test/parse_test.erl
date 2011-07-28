@@ -139,6 +139,8 @@ roundtrip_test_() ->
              %% Lists, maps
              {"empty list", list, []},
              {"list of numbers", list, [1,2,3,4]},
+             {"list 254", list, lists:duplicate(254, null)},
+             {"list 255", list, lists:duplicate(255, null)},
              {"map", map, {[{foo, 3}, {bar, 6}]}},
              %% Arrays
              {"array", {array, int}, [0, 5, 257]},
@@ -146,7 +148,9 @@ roundtrip_test_() ->
              {"array list", {array, list}, [[1, 2, 3], [4, 5, 6]]},
              {"array map", {array, map},
               [{[{foo, 1}, {bar, 2}]}, {[{baz, 3}]}]},
-             {"array null", {array, null}, [null, null, null, null]}
+             {"array null", {array, null}, [null, null, null, null]},
+             {"array 254", {array, ubyte}, lists:seq(1, 254)},
+             {"array 255", {array, ubyte}, lists:seq(1, 255)}
             ]].
 
 %% TODO arrays of arrays

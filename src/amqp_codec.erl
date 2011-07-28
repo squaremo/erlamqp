@@ -378,10 +378,10 @@ generate_list(List) ->
 encode_list(Generated, Enc8, Enc32) ->
     Count = length(Generated),
     Size = iolist_size(Generated),
-    if Count < 256 andalso Size < 255 -> % one byte for the count
-            [<<Enc8, (Size + 1):8, Count:8>>, Generated];
+    if Size > 254 -> %% one byte for count; NB Size < X -> Count < X
+            [<<Enc32, (Size + 4):32, Count:32>>, Generated];
        true ->
-            [<<Enc32, (Size + 4):32, Count:32>>, Generated]
+            [<<Enc8, (Size + 1):8, Count:8>>, Generated]
     end.
 
 generate_map({Pairs}) ->
@@ -408,7 +408,7 @@ generate_array(Type, Entries) ->
     GenValues = [generate_value(Encoding, E) || E <- Entries],
     Size = iolist_size(GenValues) + iolist_size(Constructor),
     Count = length(GenValues),
-    if Size < 256 andalso Count < 255 ->
+    if Size < 254 andalso Count < 255 ->
             [<<16#e0, (Size + 1):8, Count:8>>, Constructor, GenValues];
        true ->
             [<<16#f0, (Size + 4):32, Count:32>>, Constructor, GenValues]
